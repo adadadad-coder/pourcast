@@ -41,7 +41,7 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html{-webkit-text-size-adjust:100%}
+html{-webkit-text-size-adjust:100%;overscroll-behavior-y:contain}
 body{
   margin:0;
   background:var(--bg);
@@ -51,6 +51,7 @@ body{
   line-height:1.45;
   transition:background .25s ease;
   padding-top:env(safe-area-inset-top);
+  overscroll-behavior-y:contain;
 }
 .wrap{max-width:620px;margin:0 auto;padding:16px 14px calc(64px + env(safe-area-inset-bottom))}
 .cond{font-family:'Barlow Condensed','Arial Narrow',sans-serif}
@@ -169,6 +170,7 @@ input,select{font-family:inherit}
 
 /* Hourly table */
 .hourly{margin-top:12px;border-top:1px solid var(--line);padding-top:9px}
+.hourly-scroll{max-height:360px;overflow-y:auto}
 .hrow{
   display:grid;gap:4px;font-size:12.5px;padding:5px 5px;border-radius:5px;
   border-left:2px solid transparent;align-items:center;

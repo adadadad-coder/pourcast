@@ -376,7 +376,17 @@ function addGeo(idx) {
 
 function setActive(id) { S.activeId = id; S.expanded = null; render(); window.scrollTo({ top: 0 }); }
 function toggleEdit() { S.editing = !S.editing; render(); }
-function toggleDay(key) { S.expanded = S.expanded === key ? null : key; render(); }
+function toggleDay(key) {
+  S.expanded = S.expanded === key ? null : key;
+  render();
+  if (S.expanded === key) {
+    requestAnimationFrame(() => {
+      const el = document.getElementById("hs-" + key);
+      const win = el && el.querySelector(".hrow.win");
+      if (win) win.scrollIntoView({ block: "center" });
+    });
+  }
+}
 function openModal(m) { S.modal = m; render(); if (m === "add") { const el = document.getElementById("geoq"); if (el) el.focus(); } }
 function closeModal(ev) { if (ev && ev.target !== ev.currentTarget) return; S.modal = null; S.geoResults = []; S.query = ""; render(); }
 function removeSite(id) {
@@ -426,14 +436,14 @@ function radarView() {
 
   const src = "https://embed.windy.com/embed2.html?lat=" + f.lat + "&lon=" + f.lon +
     "&detailLat=" + f.lat + "&detailLon=" + f.lon +
-    "&zoom=" + f.zoom + "&level=surface&overlay=radar&product=radar" +
+    "&zoom=" + f.zoom + "&level=surface&overlay=rain&product=ecmwf" +
     "&menu=&message=true&marker=true&calendar=now&pressure=&type=map&location=coordinates" +
     "&metricWind=km%2Fh&metricTemp=%C2%B0C&radarRange=-1";
 
-  return '<div class="sitehead"><div class="sitetitle">Live radar <span>' + esc(f.name) + '</span></div></div>' +
+  return '<div class="sitehead"><div class="sitetitle">Rain forecast <span>' + esc(f.name) + '</span></div></div>' +
     '<div class="radarbtns">' + btns + '</div>' +
-    '<iframe class="radarframe" src="' + src + '" loading="lazy" title="Live weather radar" allowfullscreen></iframe>' +
-    '<div class="foot">Live rain radar via Windy, built on BoM radar stations. Use the play control on the map to run the last hour and see which way cells are tracking. For a marginal morning call, radar movement over the last 30 to 60 minutes beats any model.</div>';
+    '<iframe class="radarframe" src="' + src + '" loading="lazy" title="Rain forecast" allowfullscreen></iframe>' +
+    '<div class="foot">ECMWF rain forecast via Windy, anchored to now. Use the play control to step forward through the next 12 hours and beyond — the timeline covers the full model run, not just the near term.</div>';
 }
 
 /* ============================== Rendering ============================== */
@@ -462,26 +472,27 @@ function pourStrip(day) {
     '<div class="striplbl"><span>' + fmtHour(ws).toUpperCase() + '</span><span>POUR WINDOW</span><span>' + fmtHour(we).toUpperCase() + '</span></div>';
 }
 
-function hourlyTable(day) {
+function hourlyTable(day, key) {
   const ws = S.settings.ws, we = S.settings.we;
   const showProb = day.hours.some(h => h.p != null);
   const cols = showProb ? "54px 1fr 1fr 1fr 1.25fr" : "54px 1fr 1fr 1.25fr";
-  const from = Math.max(0, ws - 2), to = Math.min(24, we + 3);
-  let html = '<div class="hourly"><div class="hrow head" style="grid-template-columns:' + cols + '">' +
-    '<span>Time</span><span>Temp</span><span>Rain</span>' + (showProb ? '<span>Chance</span>' : '') + '<span>Wind / gust</span></div>';
-  for (let i = from; i < to; i++) {
+  let rows = "";
+  for (let i = 0; i < 24; i++) {
     const h = day.hours[i];
     const inWin = i >= ws && i < we;
     const wet = h.r >= 0.2;
-    html += '<div class="hrow num' + (inWin ? " win" : "") + (wet ? " wet" : "") + '" style="grid-template-columns:' + cols + '">' +
+    rows += '<div class="hrow num' + (inWin ? " win" : "") + (wet ? " wet" : "") + '" style="grid-template-columns:' + cols + '">' +
       '<span style="' + (inWin ? "font-weight:600" : "color:var(--muted)") + '">' + fmtHour(i) + '</span>' +
       '<span>' + (h.t != null ? r1(h.t) + "\u00B0" : "n/a") + '</span>' +
       '<span style="' + (wet ? "color:var(--rain);font-weight:600" : "color:var(--muted)") + '">' + (h.r >= 0.05 ? r1(h.r) + "mm" : "0") + '</span>' +
       (showProb ? '<span style="color:' + ((h.p || 0) >= 60 ? "var(--rain)" : "var(--muted)") + '">' + (h.p != null ? h.p + "%" : "n/a") + '</span>' : '') +
       '<span style="color:' + (h.g >= 40 ? "var(--accent)" : "var(--muted)") + ';' + (h.g >= 40 ? "font-weight:700" : "") + '">' + Math.round(h.w) + ' / ' + Math.round(h.g) + '</span></div>';
   }
-  html += '</div>';
-  return html;
+  return '<div class="hourly">' +
+    '<div class="hrow head" style="grid-template-columns:' + cols + '">' +
+      '<span>Time</span><span>Temp</span><span>Rain</span>' + (showProb ? '<span>Chance</span>' : '') + '<span>Wind / gust</span></div>' +
+    '<div class="hourly-scroll" id="hs-' + key + '">' + rows + '</div>' +
+  '</div>';
 }
 
 function modelTable(day, primaryKey) {
@@ -519,7 +530,7 @@ function dayCard(day, idx, siteId, primaryKey) {
     '</div>' + riskBlock(day) + '</div>' +
     pourStrip(day) +
     '<div class="tags">' + tags + '</div>' +
-    (open ? hourlyTable(day) + modelTable(day, primaryKey) : "") +
+    (open ? hourlyTable(day, key) + modelTable(day, primaryKey) : "") +
     '<div class="expandhint">' + (open ? "HIDE DETAIL" : "TAP FOR HOURLY + MODEL COMPARISON") + '</div>' +
   '</div>';
 }
@@ -668,8 +679,7 @@ function render() {
     : siteView(site);
 
   document.getElementById("app").innerHTML =
-    '<div class="header"><div><div class="logo">POUR<b>CAST</b></div>' +
-      '<div class="tagline">7 day pour risk \u00B7 multi model</div></div>' +
+    '<div class="header"><div><div class="logo">POUR<b>CAST</b></div></div>' +
       '<div style="display:flex;gap:8px">' +
         '<button class="iconbtn" onclick="toggleEdit()" title="Edit sites" aria-label="Edit sites" style="' + (S.editing ? "color:var(--accent);border-color:var(--accent)" : "") + '">\u270E</button>' +
         '<button class="iconbtn" onclick="openModal(\'settings\')" title="Settings" aria-label="Settings">\u2699</button>' +
@@ -751,6 +761,22 @@ Object.assign(window, {
   }
   window.addEventListener("touchend", release);
   window.addEventListener("touchcancel", release);
+})();
+
+/* ============================== Block pinch / double-tap zoom ============================== */
+
+(function () {
+  document.addEventListener("gesturestart", e => e.preventDefault());
+
+  let lastTap = 0, lastX = 0, lastY = 0;
+  document.addEventListener("touchend", e => {
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const now = Date.now();
+    const dx = Math.abs(t.clientX - lastX), dy = Math.abs(t.clientY - lastY);
+    if (now - lastTap < 300 && dx < 30 && dy < 30) e.preventDefault();
+    lastTap = now; lastX = t.clientX; lastY = t.clientY;
+  }, { passive: false });
 })();
 
 /* ============================== Boot ============================== */
