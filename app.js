@@ -3,10 +3,7 @@
 /* ============================== Config ============================== */
 
 const DEFAULT_SITES = [
-  { id: "syd3", name: "AirTrunk SYD3", sub: "Huntingwood 2148", lat: -33.793, lon: 150.889 },
-  { id: "newmarket", name: "Newmarket Stg 3", sub: "Randwick 2031", lat: -33.9146, lon: 151.2437 },
-  { id: "liverpool", name: "Liverpool Hosp", sub: "Liverpool 2170", lat: -33.9209, lon: 150.928 },
-  { id: "scfdc", name: "Woolworths SCFDC", sub: "Eastern Creek 2766", lat: -33.8027, lon: 150.858 },
+  { id: "sydney", name: "Sydney", sub: "Sydney NSW 2000", lat: -33.8688, lon: 151.2093 },
 ];
 
 const MODELS = [
@@ -21,15 +18,16 @@ const CACHE_MAX_AGE = 45 * 60 * 1000; // refresh if older than 45 min
 
 const S = {
   sites: load("pc_sites", DEFAULT_SITES.slice()),
-  settings: Object.assign({ theme: "auto", ws: 7, we: 15 }, load("pc_settings", {})),
+  settings: Object.assign({ theme: "auto", ws: 7, we: 15, gustFlag: 40 }, load("pc_settings", {})),
+  log: load("pc_log", []),
   activeId: "all",
   data: {},        // siteId -> {status, models?, at?, sources?, msg?}
   expanded: null,
-  editing: false,
-  modal: null,     // null | "settings" | "add"
+  modal: null,     // null | "settings" | "manage" | "picker" | "log" | "bomwarn"
   geoResults: [],
   geoBusy: false,
   query: "",
+  projName: "",
 };
 
 function load(key, fallback) {
@@ -155,7 +153,7 @@ function computeDay(dayIndex, models, primaryKey, ws, we, ensMembers) {
   if (ens) {
     const p = ens.prob;
     const level = (p <= 15 || p >= 85) ? "high" : (p <= 35 || p >= 65) ? "med" : "low";
-    conf = { level, text: ens.wet + " of " + ens.total + " ensemble runs show rain in the window (" + p + "%)" };
+    conf = { level, text: ens.wet + " of " + ens.total + " runs show rain (" + p + "%)" };
   } else if (n >= 2 && wetVotes > 0 && wetVotes < n) {
     conf = { level: wetVotes * 2 !== n ? "med" : "low", text: wetVotes + " of " + n + " models forecast rain in the pour window" };
   } else {
@@ -168,14 +166,14 @@ function computeDay(dayIndex, models, primaryKey, ws, we, ensMembers) {
     const inWin = rainSegments(hours.map((h, i) => (i >= ws && i < we) ? h : { r: 0 }));
     if (inWin.length) reasons.push(r1(st.rain) + "mm rain in pour window (" + inWin.join(", ") + ")");
   } else if (ens && ens.prob >= 40) {
-    reasons.push("Ensemble risk: " + ens.prob + "% of runs show rain despite dry primary forecast");
+    reasons.push(ens.prob + "% of runs show rain despite dry primary forecast");
   } else if (!ens && st.probMax >= 55) {
     reasons.push(st.probMax + "% chance of rain in pour window");
   }
   if (n >= 2 && wetVotes > 0 && wetVotes < n) {
     reasons.push("Models split: " + wetVotes + " of " + n + " show window rain");
   }
-  if (st.gust >= 40) reasons.push("Gusts to " + Math.round(st.gust) + " km/h, boom pump caution");
+  if (st.gust >= S.settings.gustFlag) reasons.push("Gusts to " + Math.round(st.gust) + " km/h, boom pump caution");
   else if (st.windAvg >= 25) reasons.push("Sustained wind " + Math.round(st.windAvg) + " km/h");
   if (st.tMax >= 35) reasons.push("Hot weather limit " + r1(st.tMax) + "\u00B0C (AS 1379)");
   else if (st.tMax > 32) reasons.push("High temp " + r1(st.tMax) + "\u00B0C, evaporation risk");
@@ -307,8 +305,67 @@ async function fetchSite(site, opts) {
     stale: false,
   };
   S.data[site.id] = entry;
+  logFlagged(site, entry);
   persistCache();
   render();
+}
+
+/* ============================== Flag log ============================== */
+
+function logFlagged(site, entry) {
+  const days = buildDays(entry);
+  const now = Date.now();
+  let changed = false;
+  days.forEach(day => {
+    if (day.band === "green") return;
+    const dateKey = day.date.toISOString().slice(0, 10);
+    const id = site.id + "|" + dateKey;
+    const idx = S.log.findIndex(l => l.id === id);
+    const firstSeenAt = idx === -1 ? now : S.log[idx].firstSeenAt;
+    const rec = {
+      id, siteId: site.id, site: site.name, date: dateKey,
+      band: day.band, risk: day.risk,
+      rainMm: r1(day.dayRain), gustMax: Math.round(day.gustMax),
+      tMin: r1(day.tMinDay), tMax: r1(day.tMaxDay),
+      reasons: day.reasons.join("; "),
+      firstSeenAt, updatedAt: now,
+    };
+    if (idx === -1) S.log.push(rec); else S.log[idx] = rec;
+    changed = true;
+  });
+  if (changed) {
+    if (S.log.length > 1000) S.log = S.log.slice(S.log.length - 1000);
+    save("pc_log", S.log);
+  }
+}
+
+function clearLog() {
+  S.log = [];
+  save("pc_log", S.log);
+  render();
+}
+
+function exportLogCsv() {
+  if (!S.log.length) return;
+  const cols = ["Site", "Date", "Band", "Risk %", "Rain (mm)", "Peak gust (km/h)", "Temp min", "Temp max", "Reasons", "First flagged", "Last updated"];
+  const csvEsc = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const lines = [cols.map(csvEsc).join(",")];
+  S.log.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(l => {
+    lines.push([
+      l.site, l.date, bandLabel(l.band), l.risk, l.rainMm, l.gustMax, l.tMin, l.tMax, l.reasons,
+      new Date(l.firstSeenAt).toLocaleString("en-AU"),
+      new Date(l.updatedAt).toLocaleString("en-AU"),
+    ].map(csvEsc).join(","));
+  });
+  const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "pourcast-flag-log-" + new Date().toISOString().slice(0, 10) + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function persistCache() {
@@ -344,6 +401,8 @@ function refreshAll(force) {
 async function searchGeo() {
   const el = document.getElementById("geoq");
   const q = el ? el.value.trim() : "";
+  const pnEl = document.getElementById("projname");
+  if (pnEl) S.projName = pnEl.value;
   S.query = q;
   if (!q) return;
   S.geoBusy = true; S.geoResults = []; render();
@@ -354,20 +413,23 @@ async function searchGeo() {
   S.geoBusy = false; render();
   const el2 = document.getElementById("geoq");
   if (el2) { el2.value = q; }
+  const pnEl2 = document.getElementById("projname");
+  if (pnEl2) { pnEl2.value = S.projName; }
 }
 
 function addGeo(idx) {
   const r = S.geoResults[idx];
   if (!r) return;
+  const customName = (S.projName || "").trim();
   const site = {
     id: "c" + r.id,
-    name: r.name,
+    name: customName || r.name,
     sub: [(r.postcodes && r.postcodes[0]), r.admin1].filter(Boolean).join(" "),
     lat: r.latitude, lon: r.longitude,
   };
   if (!S.sites.some(s => s.id === site.id)) S.sites.push(site);
   S.activeId = site.id;
-  S.modal = null; S.geoResults = []; S.query = "";
+  S.modal = null; S.geoResults = []; S.query = ""; S.projName = "";
   saveSites();
   fetchSite(site);
 }
@@ -375,7 +437,6 @@ function addGeo(idx) {
 /* ============================== Actions ============================== */
 
 function setActive(id) { S.activeId = id; S.expanded = null; render(); window.scrollTo({ top: 0 }); }
-function toggleEdit() { S.editing = !S.editing; render(); }
 function toggleDay(key) {
   S.expanded = S.expanded === key ? null : key;
   render();
@@ -387,8 +448,8 @@ function toggleDay(key) {
     });
   }
 }
-function openModal(m) { S.modal = m; render(); if (m === "add") { const el = document.getElementById("geoq"); if (el) el.focus(); } }
-function closeModal(ev) { if (ev && ev.target !== ev.currentTarget) return; S.modal = null; S.geoResults = []; S.query = ""; render(); }
+function openModal(m) { S.modal = m; render(); if (m === "manage") { const el = document.getElementById("projname"); if (el) el.focus(); } }
+function closeModal(ev) { if (ev && ev.target !== ev.currentTarget) return; S.modal = null; S.geoResults = []; S.query = ""; S.projName = ""; render(); }
 function removeSite(id) {
   S.sites = S.sites.filter(x => x.id !== id);
   delete S.data[id];
@@ -397,7 +458,7 @@ function removeSite(id) {
 }
 function resetSites() {
   S.sites = DEFAULT_SITES.slice();
-  S.activeId = "all"; S.editing = false; S.modal = null;
+  S.activeId = "all"; S.modal = null;
   saveSites();
   render();
   S.sites.forEach(s => fetchSite(s, { silent: true }));
@@ -413,6 +474,12 @@ function setWindow(which, val) {
   val = parseInt(val, 10);
   if (which === "ws") S.settings.ws = Math.min(val, S.settings.we - 1);
   else S.settings.we = Math.max(val, S.settings.ws + 1);
+  saveSettings(); render();
+}
+function setGustFlag(val) {
+  val = parseInt(val, 10);
+  if (!val || val <= 0) return;
+  S.settings.gustFlag = val;
   saveSettings(); render();
 }
 
@@ -442,8 +509,7 @@ function radarView() {
 
   return '<div class="sitehead"><div class="sitetitle">Rain forecast <span>' + esc(f.name) + '</span></div></div>' +
     '<div class="radarbtns">' + btns + '</div>' +
-    '<iframe class="radarframe" src="' + src + '" loading="lazy" title="Rain forecast" allowfullscreen></iframe>' +
-    '<div class="foot">ECMWF rain forecast via Windy, anchored to now. Use the play control to step forward through the next 12 hours and beyond — the timeline covers the full model run, not just the near term.</div>';
+    '<iframe class="radarframe" src="' + src + '" loading="lazy" title="Rain forecast" allowfullscreen></iframe>';
 }
 
 /* ============================== Rendering ============================== */
@@ -466,7 +532,7 @@ function pourStrip(day) {
     if (h.r >= 1) bg = "background:var(--rain-deep);";
     else if (h.r >= 0.2) bg = "background:var(--rain);opacity:.55;";
     else if (h.r >= 0.05 || (h.p != null && h.p >= 60)) bg = "background:var(--rain);opacity:.22;";
-    cells += '<div class="cell' + (h.g >= 40 ? " gusty" : "") + '" style="' + bg + '" title="' + fmtHour(ws + i) + '"></div>';
+    cells += '<div class="cell' + (h.g >= S.settings.gustFlag ? " gusty" : "") + '" style="' + bg + '" title="' + fmtHour(ws + i) + '"></div>';
   });
   return '<div class="strip">' + cells + '</div>' +
     '<div class="striplbl"><span>' + fmtHour(ws).toUpperCase() + '</span><span>POUR WINDOW</span><span>' + fmtHour(we).toUpperCase() + '</span></div>';
@@ -486,7 +552,7 @@ function hourlyTable(day, key) {
       '<span>' + (h.t != null ? r1(h.t) + "\u00B0" : "n/a") + '</span>' +
       '<span style="' + (wet ? "color:var(--rain);font-weight:600" : "color:var(--muted)") + '">' + (h.r >= 0.05 ? r1(h.r) + "mm" : "0") + '</span>' +
       (showProb ? '<span style="color:' + ((h.p || 0) >= 60 ? "var(--rain)" : "var(--muted)") + '">' + (h.p != null ? h.p + "%" : "n/a") + '</span>' : '') +
-      '<span style="color:' + (h.g >= 40 ? "var(--accent)" : "var(--muted)") + ';' + (h.g >= 40 ? "font-weight:700" : "") + '">' + Math.round(h.w) + ' / ' + Math.round(h.g) + '</span></div>';
+      '<span style="color:' + (h.g >= S.settings.gustFlag ? "var(--accent)" : "var(--muted)") + ';' + (h.g >= S.settings.gustFlag ? "font-weight:700" : "") + '">' + Math.round(h.w) + ' / ' + Math.round(h.g) + '</span></div>';
   }
   return '<div class="hourly">' +
     '<div class="hrow head" style="grid-template-columns:' + cols + '">' +
@@ -502,10 +568,10 @@ function modelTable(day, primaryKey) {
     html += '<div class="mrow num"><span class="mname">' + esc(m.label) +
       (m.key === primaryKey ? ' <span class="mprimary">PRIMARY</span>' : '') + '</span>' +
       '<span style="color:' + (m.rain >= 0.5 ? "var(--rain)" : "var(--muted)") + '">' + r1(m.rain) + 'mm</span>' +
-      '<span style="color:' + (m.gust >= 40 ? "var(--accent)" : "var(--muted)") + '">' + Math.round(m.gust) + ' km/h</span>' +
+      '<span style="color:' + (m.gust >= S.settings.gustFlag ? "var(--accent)" : "var(--muted)") + '">' + Math.round(m.gust) + ' km/h</span>' +
       '<span style="color:var(--muted)">' + r1(m.tMax) + '\u00B0</span></div>';
   });
-  html += '<div class="foot">Rain totals are for your pour window only. The primary model drives the risk score; the others are the cross check.</div></div>';
+  html += '</div>';
   return html;
 }
 
@@ -585,8 +651,7 @@ function summaryView() {
     }).join("");
   }
 
-  return '<div class="card"><div class="eyebrow">Week at a glance \u00B7 All sites</div>' + siteRows +
-    '<div class="foot">Coloured cells show pour risk % for flagged days. Tap a site row for detail.</div></div>' +
+  return '<div class="card"><div class="eyebrow">Week at a glance \u00B7 All sites</div>' + siteRows + '</div>' +
     '<div class="card"><div class="eyebrow">Flagged pour risks</div>' + flagHtml + '</div>';
 }
 
@@ -600,17 +665,10 @@ function siteView(site) {
       '<div style="color:var(--muted);font-size:12px">' + esc(d.msg || "") + '. Check your connection and tap refresh.</div></div>';
   } else {
     const days = buildDays(d);
-    const banner = !d.bomLive
-      ? '<div class="banner">BoM\u2019s open-data feed is temporarily offline for system upgrades. Forecast uses the multi-model blend and ECMWF; BoM ACCESS-G rejoins automatically when it returns.</div>'
-      : '';
     const stale = d.stale
       ? '<div class="banner">Showing your last saved forecast. Couldn\u2019t reach the weather service just now, tap refresh to retry.</div>'
       : '';
-    body = banner + stale + days.map((day, i) => dayCard(day, i, site.id, d.primary)).join("") +
-      '<div class="foot">Risk % is calculated on your ' + fmtHour(S.settings.ws) + ' to ' + fmtHour(S.settings.we) +
-      ' pour window: rain 60%, wind 25%, temperature 15%. Orange cell edges mark gusts of 40 km/h or more. ' +
-      'Sources: ' + esc((d.sources || []).join(", ")) + ' via Open-Meteo. Model guidance only, verify marginal calls against the official BoM forecast. Updated ' +
-      new Date(d.at).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) + '.</div>';
+    body = stale + days.map((day, i) => dayCard(day, i, site.id, d.primary)).join("");
   }
   return '<div class="sitehead"><div class="sitetitle">' + esc(site.name) + ' <span>' + esc(site.sub) + '</span></div>' +
     '<button class="btn ghost" onclick="refreshActive()">\u21BB REFRESH</button></div>' + body;
@@ -630,70 +688,150 @@ function settingsSheet() {
     '<div class="setrow"><div class="setlabel">Pour window</div><div class="selpair">' +
       '<select onchange="setWindow(\'ws\', this.value)">' + hoursStart + '</select><span>to</span>' +
       '<select onchange="setWindow(\'we\', this.value)">' + hoursEnd + '</select>' +
-    '</div><div class="foot">Risk scores and the strip recalculate instantly for the new window.</div></div>' +
+    '</div></div>' +
+    '<div class="setrow"><div class="setlabel">Gust to flag</div><div class="selpair">' +
+      '<input type="number" min="10" max="150" step="1" value="' + S.settings.gustFlag + '" style="width:90px" onchange="setGustFlag(this.value)">' +
+      '<span>km/h or above</span>' +
+    '</div></div>' +
     '<div class="setrow"><div class="setlabel">Sites</div>' +
-      '<button class="btn danger block" onclick="resetSites()">Reset to default project sites</button></div>' +
-    '<div class="setrow"><div class="setlabel">About</div>' +
-      '<div class="foot" style="margin-top:0">PourCast pulls four independent signals per site: the multi-model best match (primary), ECMWF IFS, BoM ACCESS-G when its feed is live, and the 51-run ECMWF ensemble that drives the confidence rating. The Radar tab shows live rain over Sydney for day-of calls. Add this page to your Home Screen on iPhone to use it as an app.</div></div>' +
+      '<button class="btn danger block" onclick="resetSites()">Reset to Sydney only</button></div>' +
+    '<div class="setrow"><div class="setlabel">Flag log</div>' +
+      '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">' + S.log.length + ' flagged day' + (S.log.length === 1 ? "" : "s") + ' recorded, for cross-checking against site records.</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn block" onclick="openModal(\'log\')">View log</button>' +
+        '<button class="btn primary block" onclick="exportLogCsv()">Export CSV</button>' +
+      '</div></div>' +
     '<button class="btn block" onclick="closeModal()">Done</button>' +
   '</div></div>';
 }
 
-function addSheet() {
+function manageSheet() {
+  const siteRows = S.sites.map(s =>
+    '<div class="georesult" style="display:flex;align-items:center;justify-content:space-between;gap:8px">' +
+      '<div style="min-width:0"><div class="sname">' + esc(s.name) + '</div><div class="ssub">' + esc(s.sub) + '</div></div>' +
+      '<button class="chip-x" onclick="removeSite(\'' + s.id + '\')" aria-label="Remove ' + esc(s.name) + '">\u00d7</button>' +
+    '</div>'
+  ).join("");
+
   const results = S.geoResults.map((r, i) => {
     const sub = [(r.postcodes && r.postcodes[0]), r.admin1].filter(Boolean).join(", ");
     return '<div class="georesult" onclick="addGeo(' + i + ')">' + esc(r.name) + ' <span class="g2">' + esc(sub) + '</span></div>';
   }).join("");
-  const hint = (!S.geoBusy && !S.geoResults.length)
-    ? '<div class="foot">Search a postcode or suburb, then tap a result. Sites are saved on this device.</div>' : "";
+
   return '<div class="sheet-scrim" onclick="closeModal(event)"><div class="sheet">' +
-    '<h2>Add a site</h2><div class="sub">Anywhere in Australia by postcode or suburb.</div>' +
-    '<div class="addrow"><input type="text" id="geoq" value="' + esc(S.query) + '" placeholder="e.g. 2765 or Marsden Park" ' +
-      'onkeydown="if(event.key===\'Enter\')searchGeo()">' +
-      '<button class="btn primary" onclick="searchGeo()">' + (S.geoBusy ? "\u2026" : "Search") + '</button></div>' +
-    results + hint +
+    '<h2>Manage projects</h2><div class="sub">Add or remove project sites. Saved on this device.</div>' +
+    (siteRows || '<div style="font-size:13px;color:var(--muted);margin-bottom:10px">No projects yet.</div>') +
+    '<div class="setrow" style="margin-top:16px"><div class="setlabel">Add a project</div>' +
+      '<input type="text" id="projname" value="' + esc(S.projName) + '" placeholder="Project name, e.g. AirTrunk SYD3" style="margin-bottom:8px">' +
+      '<div class="addrow"><input type="text" id="geoq" value="' + esc(S.query) + '" placeholder="e.g. 2765 or Marsden Park" ' +
+        'onkeydown="if(event.key===\'Enter\')searchGeo()">' +
+        '<button class="btn primary" onclick="searchGeo()">' + (S.geoBusy ? "\u2026" : "Search") + '</button></div>' +
+      results +
+    '</div>' +
+    '<button class="btn block" onclick="closeModal()">Done</button>' +
   '</div></div>';
 }
 
-function render() {
-  const chips = [
-    '<div class="chip' + (S.activeId === "all" ? " on" : "") + '" onclick="setActive(\'all\')"><div class="nm">All sites</div><div class="sb">Summary</div></div>',
-    '<div class="chip' + (S.activeId === "radar" ? " on" : "") + '" onclick="setActive(\'radar\')"><div class="nm">Radar</div><div class="sb">Live \u00B7 Sydney</div></div>',
-  ]
-    .concat(S.sites.map(s => {
-      const d = S.data[s.id];
-      let dot = "";
-      if (d && d.models) {
-        const today = buildDays(d)[0];
-        if (today) dot = '<span class="statusdot" style="background:' + bandColor(today.band) + '"></span>';
-      }
-      const rm = S.editing ? '<button class="chip-x" onclick="event.stopPropagation();removeSite(\'' + s.id + '\')" aria-label="Remove ' + esc(s.name) + '">\u00D7</button>' : "";
-      return '<div class="chip' + (S.activeId === s.id ? " on" : "") + '" onclick="setActive(\'' + s.id + '\')">' +
-        '<div class="chip-inner">' + dot + '<div><div class="nm">' + esc(s.name) + '</div><div class="sb">' + esc(s.sub) + '</div></div>' + rm + '</div></div>';
-    }))
-    .concat(['<button class="chip-add" onclick="openModal(\'add\')">+ Add site</button>']).join("");
+function pickerSheet() {
+  const rows = S.sites.map(s => {
+    const d = S.data[s.id];
+    let dot = "";
+    if (d && d.models) {
+      const today = buildDays(d)[0];
+      if (today) dot = '<span class="statusdot" style="background:' + bandColor(today.band) + '"></span>';
+    }
+    return '<div class="georesult" style="display:flex;align-items:center;gap:8px" onclick="setActive(\'' + s.id + '\');closeModal()">' +
+      dot + '<div style="flex:1;min-width:0"><div class="sname">' + esc(s.name) + '</div><div class="ssub">' + esc(s.sub) + '</div></div></div>';
+  }).join("");
+  const body = S.sites.length ? rows : '<div style="font-size:13px;color:var(--muted)">No projects yet. Use the pencil icon to add one.</div>';
+  return '<div class="sheet-scrim" onclick="closeModal(event)"><div class="sheet">' +
+    '<h2>Select project</h2><div class="sub">Tap a project to view its forecast.</div>' +
+    body +
+    '<button class="btn block" style="margin-top:12px" onclick="closeModal()">Cancel</button>' +
+  '</div></div>';
+}
 
-  const site = S.sites.find(s => s.id === S.activeId);
+function logSheet() {
+  const rows = S.log.slice().sort((a, b) => b.date.localeCompare(a.date)).map(l =>
+    '<div class="flagrow"><span class="flagpct num" style="background:' + bandColor(l.band) + '">' + l.risk + '%</span>' +
+      '<div style="flex:1;min-width:0"><div class="flagtitle">' + esc(l.site) + ' \u00b7 ' + esc(l.date) + '</div>' +
+      '<div class="flagsub">' + esc(l.reasons) + '</div></div></div>'
+  ).join("");
+  const body = S.log.length ? rows : '<div style="font-size:13px;color:var(--muted)">No flagged days logged yet.</div>';
+  return '<div class="sheet-scrim" onclick="closeModal(event)"><div class="sheet">' +
+    '<h2>Flagged day log</h2><div class="sub">' + S.log.length + ' recorded \u00b7 for cross-checking against site records.</div>' +
+    '<div style="max-height:50vh;overflow-y:auto">' + body + '</div>' +
+    '<div style="display:flex;gap:8px;margin-top:14px">' +
+      '<button class="btn block" onclick="exportLogCsv()">Export CSV</button>' +
+      '<button class="btn danger block" onclick="clearLog()">Clear log</button>' +
+    '</div>' +
+    '<button class="btn block" style="margin-top:8px" onclick="closeModal()">Done</button>' +
+  '</div></div>';
+}
+
+function bomwarnSheet() {
+  return '<div class="sheet-scrim" onclick="closeModal(event)"><div class="sheet">' +
+    '<h2>BoM feed offline</h2>' +
+    '<div class="sub" style="margin-bottom:0">BoM\u2019s open-data feed is temporarily offline for system upgrades. Forecasts use the multi-model blend and ECMWF; BoM ACCESS-G rejoins automatically when it returns.</div>' +
+    '<button class="btn block" style="margin-top:14px" onclick="closeModal()">Done</button>' +
+  '</div></div>';
+}
+
+function bomWarningActive() {
+  return S.sites.some(s => {
+    const d = S.data[s.id];
+    return d && (d.status === "ok" || d.status === "refreshing") && d.bomLive === false;
+  });
+}
+
+function lastUpdatedLabel() {
+  let latest = 0;
+  S.sites.forEach(s => {
+    const d = S.data[s.id];
+    if (d && d.at && d.at > latest) latest = d.at;
+  });
+  if (!latest) return "";
+  return "Updated " + new Date(latest).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+}
+
+function render() {
+  const activeSite = S.sites.find(s => s.id === S.activeId);
+  const projLabel = activeSite ? activeSite.name : "Select project";
+  const nav =
+    '<button class="navbtn' + (S.activeId === "all" ? " on" : "") + '" onclick="setActive(\'all\')">All sites</button>' +
+    '<button class="navbtn' + (S.activeId === "radar" ? " on" : "") + '" onclick="setActive(\'radar\')">Radar</button>' +
+    '<button class="navbtn' + (activeSite ? " on" : "") + '" onclick="openModal(\'picker\')">' + esc(projLabel) + '</button>';
+
   const content = S.activeId === "radar" ? radarView()
-    : (S.activeId === "all" || !site) ? summaryView()
-    : siteView(site);
+    : (S.activeId === "all" || !activeSite) ? summaryView()
+    : siteView(activeSite);
+
+  const warnBtn = bomWarningActive()
+    ? '<button class="iconbtn warn" onclick="openModal(\'bomwarn\')" title="BoM feed offline" aria-label="BoM feed offline">!</button>'
+    : "";
 
   document.getElementById("app").innerHTML =
     '<div class="header"><div><div class="logo">POUR<b>CAST</b></div></div>' +
       '<div style="display:flex;gap:8px">' +
-        '<button class="iconbtn" onclick="toggleEdit()" title="Edit sites" aria-label="Edit sites" style="' + (S.editing ? "color:var(--accent);border-color:var(--accent)" : "") + '">\u270E</button>' +
+        '<button class="iconbtn" onclick="openModal(\'manage\')" title="Manage projects" aria-label="Manage projects">\u270E</button>' +
+        warnBtn +
         '<button class="iconbtn" onclick="openModal(\'settings\')" title="Settings" aria-label="Settings">\u2699</button>' +
       '</div></div>' +
-    '<div class="chiprow">' + chips + '</div>' +
+    '<div class="navrow">' + nav + '</div>' +
     '<div>' + content + '</div>' +
+    '<div class="pagefoot">' + esc(lastUpdatedLabel()) + '</div>' +
     (S.modal === "settings" ? settingsSheet() : "") +
-    (S.modal === "add" ? addSheet() : "");
+    (S.modal === "manage" ? manageSheet() : "") +
+    (S.modal === "picker" ? pickerSheet() : "") +
+    (S.modal === "log" ? logSheet() : "") +
+    (S.modal === "bomwarn" ? bomwarnSheet() : "");
 }
 
 /* Expose handlers used in markup */
 Object.assign(window, {
-  setActive, toggleEdit, toggleDay, openModal, closeModal, removeSite,
-  resetSites, refreshActive, setTheme, setWindow, searchGeo, addGeo, setRadarFocus,
+  setActive, toggleDay, openModal, closeModal, removeSite,
+  resetSites, refreshActive, setTheme, setWindow, setGustFlag,
+  searchGeo, addGeo, setRadarFocus, exportLogCsv, clearLog,
 });
 
 /* ============================== Pull to refresh ============================== */
