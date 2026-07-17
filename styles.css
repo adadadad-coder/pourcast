@@ -59,6 +59,27 @@ button{font-family:inherit;cursor:pointer}
 input,select{font-family:inherit}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 
+/* Pull to refresh */
+.ptr{
+  position:fixed;top:calc(6px + env(safe-area-inset-top));left:50%;
+  width:34px;height:34px;border-radius:50%;
+  background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);
+  display:flex;align-items:center;justify-content:center;
+  z-index:50;opacity:0;pointer-events:none;
+  transform:translate(-50%,-60px);
+  transition:transform .25s ease,opacity .25s ease;
+}
+.ptr.pulling{transition:none}
+.ptr .ptr-spinner{
+  width:15px;height:15px;border-radius:50%;
+  border:2px solid var(--line);border-top-color:var(--accent);
+}
+.ptr.spinning .ptr-spinner{animation:ptrspin .7s linear infinite}
+@keyframes ptrspin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){
+  .ptr.spinning .ptr-spinner{animation:none}
+}
+
 /* Header */
 .header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
 .logo{font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:32px;line-height:1;letter-spacing:.5px;color:var(--ink)}

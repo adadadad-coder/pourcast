@@ -330,11 +330,13 @@ function hydrateCache() {
 }
 
 function refreshAll(force) {
+  const pending = [];
   S.sites.forEach(s => {
     const d = S.data[s.id];
     const fresh = d && d.status === "ok" && !d.stale && (Date.now() - d.at) < CACHE_MAX_AGE;
-    if (force || !fresh) fetchSite(s, { silent: true });
+    if (force || !fresh) pending.push(fetchSite(s, { silent: true }));
   });
+  return Promise.all(pending);
 }
 
 /* ============================== Geocoding ============================== */
@@ -391,9 +393,10 @@ function resetSites() {
   S.sites.forEach(s => fetchSite(s, { silent: true }));
 }
 function refreshActive() {
-  if (S.activeId === "all") { refreshAll(true); return; }
+  if (S.activeId === "all") return refreshAll(true);
+  if (S.activeId === "radar") return Promise.resolve();
   const s = S.sites.find(x => x.id === S.activeId);
-  if (s) fetchSite(s);
+  return s ? fetchSite(s) : Promise.resolve();
 }
 function setTheme(t) { S.settings.theme = t; saveSettings(); applyTheme(); render(); }
 function setWindow(which, val) {
@@ -682,6 +685,73 @@ Object.assign(window, {
   setActive, toggleEdit, toggleDay, openModal, closeModal, removeSite,
   resetSites, refreshActive, setTheme, setWindow, searchGeo, addGeo, setRadarFocus,
 });
+
+/* ============================== Pull to refresh ============================== */
+
+(function () {
+  const THRESH = 64;
+  const MAX = 100;
+  const ptr = document.getElementById("ptr");
+  if (!ptr) return;
+  let startY = null, dragging = false, busy = false, dist = 0;
+
+  function atTop() {
+    return (window.scrollY || document.documentElement.scrollTop || 0) <= 0;
+  }
+  function setPull(px) {
+    dist = px;
+    ptr.style.opacity = String(Math.min(1, px / THRESH));
+    ptr.style.transform = "translate(-50%, " + (px - 60) + "px) rotate(" + (px * 3) + "deg)";
+  }
+  function hide() {
+    ptr.classList.remove("pulling", "spinning");
+    ptr.style.transform = "translate(-50%, -60px)";
+    ptr.style.opacity = "0";
+  }
+  function showSpinner() {
+    ptr.classList.remove("pulling");
+    ptr.classList.add("spinning");
+    ptr.style.transform = "translate(-50%, 18px)";
+    ptr.style.opacity = "1";
+  }
+
+  window.addEventListener("touchstart", e => {
+    if (busy || S.modal || e.touches.length !== 1 || !atTop()) { startY = null; return; }
+    startY = e.touches[0].clientY;
+    dragging = false;
+  }, { passive: true });
+
+  window.addEventListener("touchmove", e => {
+    if (startY == null || busy) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy <= 0 || !atTop()) {
+      if (dragging) hide();
+      startY = null; dragging = false;
+      return;
+    }
+    dragging = true;
+    ptr.classList.add("pulling");
+    setPull(Math.min(MAX, dy * 0.5));
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  function release() {
+    if (!dragging) { startY = null; return; }
+    dragging = false; startY = null;
+    if (dist >= THRESH && !busy) {
+      busy = true;
+      showSpinner();
+      Promise.resolve(refreshActive()).then(() => {
+        setTimeout(() => { busy = false; hide(); }, 250);
+      });
+    } else {
+      hide();
+    }
+    dist = 0;
+  }
+  window.addEventListener("touchend", release);
+  window.addEventListener("touchcancel", release);
+})();
 
 /* ============================== Boot ============================== */
 

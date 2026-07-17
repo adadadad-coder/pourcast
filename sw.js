@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE = "pourcast-v2";
+const CACHE = "pourcast-v3";
 const SHELL = [
   "./",
   "./index.html",
