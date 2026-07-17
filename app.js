@@ -101,14 +101,32 @@ function windowStats(hours, ws, we) {
   };
 }
 
-function computeDay(dayIndex, models, primaryKey, ws, we) {
+function computeDay(dayIndex, models, primaryKey, ws, we, ensMembers) {
   const hours = models[primaryKey].slice(dayIndex * 24, dayIndex * 24 + 24);
   const st = windowStats(hours, ws, we);
 
-  // Rain component (60%)
+  // Ensemble: fraction of independent model runs showing meaningful rain in the window
+  let ens = null;
+  if (ensMembers && ensMembers.length) {
+    let wet = 0;
+    ensMembers.forEach(arr => {
+      let r = 0;
+      for (let i = ws; i < we; i++) r += arr[dayIndex * 24 + i] || 0;
+      if (r >= 0.5) wet++;
+    });
+    ens = { total: ensMembers.length, wet, prob: Math.round(100 * wet / ensMembers.length) };
+  }
+
+  // Rain component (60%): deterministic mm blended with ensemble probability when available
   const mmScore = Math.min(100, st.rain * 18 + st.wet * 7);
-  const probScore = st.probMax ? Math.min(100, Math.max(0, (st.probMax - 15) * 1.1)) : 0;
-  const rainComp = Math.min(100, Math.max(mmScore, probScore * 0.75));
+  let rainComp;
+  if (ens) {
+    const ensScore = Math.min(100, Math.max(0, (ens.prob - 8) * 1.25));
+    rainComp = Math.min(100, Math.max(mmScore, ensScore) * 0.7 + Math.min(mmScore, ensScore) * 0.3);
+  } else {
+    const probScore = st.probMax ? Math.min(100, Math.max(0, (st.probMax - 15) * 1.1)) : 0;
+    rainComp = Math.min(100, Math.max(mmScore, probScore * 0.75));
+  }
 
   // Wind component (25%)
   const windComp = Math.min(100, Math.max(Math.max(0, (st.gust - 25) * 2.8), Math.max(0, (st.windAvg - 20) * 3)));
@@ -121,7 +139,7 @@ function computeDay(dayIndex, models, primaryKey, ws, we) {
   const risk = Math.round(rainComp * 0.6 + windComp * 0.25 + tempComp * 0.15);
   const band = risk < 30 ? "green" : risk <= 60 ? "amber" : "red";
 
-  // Consensus across available models
+  // Deterministic model cross check
   const perModel = [];
   MODELS.forEach(m => {
     if (!models[m.key]) return;
@@ -131,13 +149,17 @@ function computeDay(dayIndex, models, primaryKey, ws, we) {
   });
   const wetVotes = perModel.filter(m => m.wet).length;
   const n = perModel.length;
-  let conf = { level: "high", text: n <= 1 ? "Single model" : "Models agree" };
-  if (n >= 2 && wetVotes > 0 && wetVotes < n) {
-    const majority = wetVotes * 2 !== n;
-    conf = {
-      level: majority ? "med" : "low",
-      text: wetVotes + " of " + n + " models forecast rain in the pour window",
-    };
+
+  // Confidence: ensemble is the strongest signal when present
+  let conf;
+  if (ens) {
+    const p = ens.prob;
+    const level = (p <= 15 || p >= 85) ? "high" : (p <= 35 || p >= 65) ? "med" : "low";
+    conf = { level, text: ens.wet + " of " + ens.total + " ensemble runs show rain in the window (" + p + "%)" };
+  } else if (n >= 2 && wetVotes > 0 && wetVotes < n) {
+    conf = { level: wetVotes * 2 !== n ? "med" : "low", text: wetVotes + " of " + n + " models forecast rain in the pour window" };
+  } else {
+    conf = { level: "high", text: n <= 1 ? "Single model" : "Models agree" };
   }
 
   // Reasons
@@ -145,8 +167,13 @@ function computeDay(dayIndex, models, primaryKey, ws, we) {
   if (st.rain >= 0.2) {
     const inWin = rainSegments(hours.map((h, i) => (i >= ws && i < we) ? h : { r: 0 }));
     if (inWin.length) reasons.push(r1(st.rain) + "mm rain in pour window (" + inWin.join(", ") + ")");
-  } else if (st.probMax >= 55) {
+  } else if (ens && ens.prob >= 40) {
+    reasons.push("Ensemble risk: " + ens.prob + "% of runs show rain despite dry primary forecast");
+  } else if (!ens && st.probMax >= 55) {
     reasons.push(st.probMax + "% chance of rain in pour window");
+  }
+  if (n >= 2 && wetVotes > 0 && wetVotes < n) {
+    reasons.push("Models split: " + wetVotes + " of " + n + " show window rain");
   }
   if (st.gust >= 40) reasons.push("Gusts to " + Math.round(st.gust) + " km/h, boom pump caution");
   else if (st.windAvg >= 25) reasons.push("Sustained wind " + Math.round(st.windAvg) + " km/h");
@@ -158,7 +185,7 @@ function computeDay(dayIndex, models, primaryKey, ws, we) {
 
   const tempsAll = hours.map(h => h.t).filter(t => t != null);
   return {
-    hours, risk, band, reasons, conf, perModel,
+    hours, risk, band, reasons, conf, perModel, ens,
     gustMax: st.gust, probMax: st.probMax,
     daySegs: rainSegments(hours),
     dayRain: hours.reduce((s, h) => s + (h.r || 0), 0),
@@ -174,7 +201,7 @@ function buildDays(entry) {
   const ws = S.settings.ws, we = S.settings.we;
   const days = [];
   for (let d = 0; d < nDays; d++) {
-    const day = computeDay(d, entry.models, primaryKey, ws, we);
+    const day = computeDay(d, entry.models, primaryKey, ws, we, entry.ensemble || null);
     day.date = new Date(times[d * 24]);
     days.push(day);
   }
@@ -228,13 +255,27 @@ async function fetchSite(site, opts) {
     best: "https://api.open-meteo.com/v1/forecast?" + coords + "&hourly=" + vars + ",precipitation_probability",
     ecmwf: "https://api.open-meteo.com/v1/forecast?" + coords + "&hourly=" + vars + "&models=ecmwf_ifs025",
     bom: "https://api.open-meteo.com/v1/bom?" + coords + "&hourly=" + vars,
+    ens: "https://ensemble-api.open-meteo.com/v1/ensemble?" + coords + "&hourly=precipitation&models=ecmwf_ifs025",
   };
 
-  const results = await Promise.allSettled([fetchJson(urls.best), fetchJson(urls.ecmwf), fetchJson(urls.bom)]);
+  const results = await Promise.allSettled([fetchJson(urls.best), fetchJson(urls.ecmwf), fetchJson(urls.bom), fetchJson(urls.ens)]);
   const jsons = { best: null, ecmwf: null, bom: null };
   ["best", "ecmwf", "bom"].forEach((k, i) => {
     if (results[i].status === "fulfilled" && hasRealData(results[i].value)) jsons[k] = results[i].value;
   });
+
+  // Ensemble members: every hourly key beginning with "precipitation" is one model run
+  // (the control run plus 50 perturbed members for ECMWF ENS).
+  let ensemble = null;
+  if (results[3].status === "fulfilled") {
+    const EH = results[3].value.hourly;
+    if (EH && EH.time && EH.time.length) {
+      const members = Object.keys(EH)
+        .filter(k => k.indexOf("precipitation") === 0)
+        .map(k => (EH[k] || []).map(v => v == null ? 0 : Math.round(v * 10) / 10));
+      if (members.length >= 10) ensemble = members;
+    }
+  }
 
   const primary = jsons.best ? "best" : jsons.ecmwf ? "ecmwf" : jsons.bom ? "bom" : null;
   if (!primary) {
@@ -259,7 +300,8 @@ async function fetchSite(site, opts) {
     primary,
     times: jsons[primary].hourly.time,
     models,
-    sources: MODELS.filter(m => models[m.key]).map(m => m.label),
+    ensemble,
+    sources: MODELS.filter(m => models[m.key]).map(m => m.label).concat(ensemble ? ["ECMWF ensemble (" + ensemble.length + " runs)"] : []),
     bomLive: !!jsons.bom,
     at: Date.now(),
     stale: false,
@@ -274,7 +316,7 @@ function persistCache() {
   S.sites.forEach(s => {
     const d = S.data[s.id];
     if (d && d.status === "ok") {
-      out[s.id] = { primary: d.primary, times: d.times, models: d.models, sources: d.sources, bomLive: d.bomLive, at: d.at };
+      out[s.id] = { primary: d.primary, times: d.times, models: d.models, ensemble: d.ensemble || null, sources: d.sources, bomLive: d.bomLive, at: d.at };
     }
   });
   save("pc_cache", out);
@@ -361,6 +403,36 @@ function setWindow(which, val) {
   saveSettings(); render();
 }
 
+/* ============================== Radar ============================== */
+
+const SYDNEY = { name: "All Sydney", lat: -33.86, lon: 150.95, zoom: 8 };
+
+function setRadarFocus(idx) {
+  S.radarFocus = idx < 0 ? null : idx;
+  render();
+}
+
+function radarView() {
+  const focusSite = (S.radarFocus != null && S.sites[S.radarFocus]) ? S.sites[S.radarFocus] : null;
+  const f = focusSite ? { name: focusSite.name, lat: focusSite.lat, lon: focusSite.lon, zoom: 10 } : SYDNEY;
+
+  const btns = ['<button class="btn' + (!focusSite ? " primary" : "") + '" onclick="setRadarFocus(-1)">All Sydney</button>']
+    .concat(S.sites.map((s, i) =>
+      '<button class="btn' + (S.radarFocus === i ? " primary" : "") + '" onclick="setRadarFocus(' + i + ')">' + esc(s.name) + '</button>'
+    )).join("");
+
+  const src = "https://embed.windy.com/embed2.html?lat=" + f.lat + "&lon=" + f.lon +
+    "&detailLat=" + f.lat + "&detailLon=" + f.lon +
+    "&zoom=" + f.zoom + "&level=surface&overlay=radar&product=radar" +
+    "&menu=&message=true&marker=true&calendar=now&pressure=&type=map&location=coordinates" +
+    "&metricWind=km%2Fh&metricTemp=%C2%B0C&radarRange=-1";
+
+  return '<div class="sitehead"><div class="sitetitle">Live radar <span>' + esc(f.name) + '</span></div></div>' +
+    '<div class="radarbtns">' + btns + '</div>' +
+    '<iframe class="radarframe" src="' + src + '" loading="lazy" title="Live weather radar" allowfullscreen></iframe>' +
+    '<div class="foot">Live rain radar via Windy, built on BoM radar stations. Use the play control on the map to run the last hour and see which way cells are tracking. For a marginal morning call, radar movement over the last 30 to 60 minutes beats any model.</div>';
+}
+
 /* ============================== Rendering ============================== */
 
 function confColor(level) {
@@ -376,12 +448,12 @@ function riskBlock(day) {
 function pourStrip(day) {
   const ws = S.settings.ws, we = S.settings.we;
   let cells = "";
-  day.hours.slice(ws, we).forEach(h => {
+  day.hours.slice(ws, we).forEach((h, i) => {
     let bg = "";
     if (h.r >= 1) bg = "background:var(--rain-deep);";
     else if (h.r >= 0.2) bg = "background:var(--rain);opacity:.55;";
     else if (h.r >= 0.05 || (h.p != null && h.p >= 60)) bg = "background:var(--rain);opacity:.22;";
-    cells += '<div class="cell' + (h.g >= 40 ? " gusty" : "") + '" style="' + bg + '" title="' + fmtHour(h.h == null ? 0 : h.h) + '"></div>';
+    cells += '<div class="cell' + (h.g >= 40 ? " gusty" : "") + '" style="' + bg + '" title="' + fmtHour(ws + i) + '"></div>';
   });
   return '<div class="strip">' + cells + '</div>' +
     '<div class="striplbl"><span>' + fmtHour(ws).toUpperCase() + '</span><span>POUR WINDOW</span><span>' + fmtHour(we).toUpperCase() + '</span></div>';
@@ -548,7 +620,7 @@ function settingsSheet() {
     '<div class="setrow"><div class="setlabel">Sites</div>' +
       '<button class="btn danger block" onclick="resetSites()">Reset to default project sites</button></div>' +
     '<div class="setrow"><div class="setlabel">About</div>' +
-      '<div class="foot" style="margin-top:0">PourCast pulls three independent forecast sources per site (multi-model best match, ECMWF IFS, and BoM ACCESS-G when its feed is live) and cross checks them for confidence. Add this page to your Home Screen on iPhone to use it as an app.</div></div>' +
+      '<div class="foot" style="margin-top:0">PourCast pulls four independent signals per site: the multi-model best match (primary), ECMWF IFS, BoM ACCESS-G when its feed is live, and the 51-run ECMWF ensemble that drives the confidence rating. The Radar tab shows live rain over Sydney for day-of calls. Add this page to your Home Screen on iPhone to use it as an app.</div></div>' +
     '<button class="btn block" onclick="closeModal()">Done</button>' +
   '</div></div>';
 }
@@ -570,7 +642,10 @@ function addSheet() {
 }
 
 function render() {
-  const chips = ['<div class="chip' + (S.activeId === "all" ? " on" : "") + '" onclick="setActive(\'all\')"><div class="nm">All sites</div><div class="sb">Summary</div></div>']
+  const chips = [
+    '<div class="chip' + (S.activeId === "all" ? " on" : "") + '" onclick="setActive(\'all\')"><div class="nm">All sites</div><div class="sb">Summary</div></div>',
+    '<div class="chip' + (S.activeId === "radar" ? " on" : "") + '" onclick="setActive(\'radar\')"><div class="nm">Radar</div><div class="sb">Live \u00B7 Sydney</div></div>',
+  ]
     .concat(S.sites.map(s => {
       const d = S.data[s.id];
       let dot = "";
@@ -585,7 +660,9 @@ function render() {
     .concat(['<button class="chip-add" onclick="openModal(\'add\')">+ Add site</button>']).join("");
 
   const site = S.sites.find(s => s.id === S.activeId);
-  const content = (S.activeId === "all" || !site) ? summaryView() : siteView(site);
+  const content = S.activeId === "radar" ? radarView()
+    : (S.activeId === "all" || !site) ? summaryView()
+    : siteView(site);
 
   document.getElementById("app").innerHTML =
     '<div class="header"><div><div class="logo">POUR<b>CAST</b></div>' +
@@ -603,7 +680,7 @@ function render() {
 /* Expose handlers used in markup */
 Object.assign(window, {
   setActive, toggleEdit, toggleDay, openModal, closeModal, removeSite,
-  resetSites, refreshActive, setTheme, setWindow, searchGeo, addGeo,
+  resetSites, refreshActive, setTheme, setWindow, searchGeo, addGeo, setRadarFocus,
 });
 
 /* ============================== Boot ============================== */
