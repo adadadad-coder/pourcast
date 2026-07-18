@@ -3,7 +3,7 @@
 /* ============================== Config ============================== */
 
 const DEFAULT_SITES = [
-  { id: "sydney", name: "Sydney", sub: "Sydney NSW 2000", lat: -33.8688, lon: 151.2093 },
+  { id: "sydney", name: "Sydney", sub: "Sydney 2000", lat: -33.8688, lon: 151.2093 },
 ];
 
 const MODELS = [
@@ -424,14 +424,18 @@ function addGeo(idx) {
   const site = {
     id: "c" + r.id,
     name: customName || r.name,
-    sub: [(r.postcodes && r.postcodes[0]), r.admin1].filter(Boolean).join(" "),
+    sub: [r.name, (r.postcodes && r.postcodes[0])].filter(Boolean).join(" "),
     lat: r.latitude, lon: r.longitude,
   };
   if (!S.sites.some(s => s.id === site.id)) S.sites.push(site);
   S.activeId = site.id;
-  S.modal = null; S.geoResults = []; S.query = ""; S.projName = "";
+  S.geoResults = []; S.query = ""; S.projName = "";
   saveSites();
   fetchSite(site);
+  requestAnimationFrame(() => {
+    const el = document.getElementById("projname");
+    if (el) el.focus();
+  });
 }
 
 /* ============================== Actions ============================== */
@@ -722,8 +726,8 @@ function manageSheet() {
     '<h2>Manage projects</h2><div class="sub">Add or remove project sites. Saved on this device.</div>' +
     (siteRows || '<div style="font-size:13px;color:var(--muted);margin-bottom:10px">No projects yet.</div>') +
     '<div class="setrow" style="margin-top:16px"><div class="setlabel">Add a project</div>' +
-      '<input type="text" id="projname" value="' + esc(S.projName) + '" placeholder="Project name, e.g. AirTrunk SYD3" style="margin-bottom:8px">' +
-      '<div class="addrow"><input type="text" id="geoq" value="' + esc(S.query) + '" placeholder="e.g. 2765 or Marsden Park" ' +
+      '<input type="text" id="projname" value="' + esc(S.projName) + '" placeholder="Project name" style="margin-bottom:8px">' +
+      '<div class="addrow"><input type="text" id="geoq" value="' + esc(S.query) + '" placeholder="Enter suburb or city" ' +
         'onkeydown="if(event.key===\'Enter\')searchGeo()">' +
         '<button class="btn primary" onclick="searchGeo()">' + (S.geoBusy ? "\u2026" : "Search") + '</button></div>' +
       results +
@@ -800,7 +804,7 @@ function render() {
   const nav =
     '<button class="navbtn' + (S.activeId === "all" ? " on" : "") + '" onclick="setActive(\'all\')">All sites</button>' +
     '<button class="navbtn' + (S.activeId === "radar" ? " on" : "") + '" onclick="setActive(\'radar\')">Radar</button>' +
-    '<button class="navbtn' + (activeSite ? " on" : "") + '" onclick="openModal(\'picker\')">' + esc(projLabel) + '</button>';
+    '<button class="navbtn' + (activeSite ? " on" : "") + '" onclick="openModal(\'picker\')">' + esc(projLabel) + ' <span class="navcaret">▾</span></button>';
 
   const content = S.activeId === "radar" ? radarView()
     : (S.activeId === "all" || !activeSite) ? summaryView()

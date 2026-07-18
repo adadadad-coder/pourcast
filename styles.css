@@ -102,6 +102,7 @@ input,select{font-family:inherit}
   transition:transform .1s ease;
 }
 .navbtn:active{transform:scale(.97)}
+.navcaret{font-size:9px;opacity:.65}
 .navbtn.on{background:var(--ink);border-color:var(--ink);color:var(--bg)}
 [data-theme="dark"] .navbtn.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .statusdot{width:8px;height:8px;border-radius:4px;flex:0 0 auto}
